@@ -1,4 +1,5 @@
 from __future__ import annotations
+from dataclasses import dataclass
 from .schemas import QAExample, JudgeResult, ReflectionEntry
 from .utils import normalize_answer
 
@@ -24,3 +25,26 @@ def evaluator(example: QAExample, answer: str) -> JudgeResult:
 def reflector(example: QAExample, attempt_id: int, judge: JudgeResult) -> ReflectionEntry:
     strategy = "Do the second hop explicitly: birthplace city -> river through that city." if example.qid == "hp2" else "Verify the final entity against the second paragraph before answering."
     return ReflectionEntry(attempt_id=attempt_id, failure_reason=judge.reason, lesson="A partial first-hop answer is not enough; the final answer must complete all hops.", next_strategy=strategy)
+
+@dataclass
+class MockResult:
+    text: str | None = None
+    judge: JudgeResult | None = None
+    reflection: ReflectionEntry | None = None
+    tokens: int = 0
+    latency_ms: int = 0
+
+class MockRuntime:
+    failure_modes = FAILURE_MODE_BY_QID
+
+    def actor_answer(self, example: QAExample, attempt_id: int, agent_type: str, reflection_memory: list[str]) -> MockResult:
+        answer = actor_answer(example, attempt_id, agent_type, reflection_memory)
+        tokens = 320 + (attempt_id * 65) + (120 if agent_type == "reflexion" else 0)
+        latency_ms = 160 + (attempt_id * 40) + (90 if agent_type == "reflexion" else 0)
+        return MockResult(text=answer, tokens=tokens, latency_ms=latency_ms)
+
+    def evaluator(self, example: QAExample, answer: str) -> MockResult:
+        return MockResult(judge=evaluator(example, answer), tokens=25, latency_ms=20)
+
+    def reflector(self, example: QAExample, attempt_id: int, judge: JudgeResult) -> MockResult:
+        return MockResult(reflection=reflector(example, attempt_id, judge), tokens=60, latency_ms=35)

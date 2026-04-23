@@ -18,13 +18,43 @@ def summarize(records: list[RunRecord]) -> dict:
 
 def failure_breakdown(records: list[RunRecord]) -> dict:
     grouped: dict[str, Counter] = defaultdict(Counter)
+    overall: Counter = Counter()
     for record in records:
         grouped[record.agent_type][record.failure_mode] += 1
-    return {agent: dict(counter) for agent, counter in grouped.items()}
+        overall[record.failure_mode] += 1
+    result = {agent: dict(counter) for agent, counter in grouped.items()}
+    result["overall"] = dict(overall)
+    return result
 
 def build_report(records: list[RunRecord], dataset_name: str, mode: str = "mock") -> ReportPayload:
     examples = [{"qid": r.qid, "agent_type": r.agent_type, "gold_answer": r.gold_answer, "predicted_answer": r.predicted_answer, "is_correct": r.is_correct, "attempts": r.attempts, "failure_mode": r.failure_mode, "reflection_count": len(r.reflections)} for r in records]
-    return ReportPayload(meta={"dataset": dataset_name, "mode": mode, "num_records": len(records), "agents": sorted({r.agent_type for r in records})}, summary=summarize(records), failure_modes=failure_breakdown(records), examples=examples, extensions=["structured_evaluator", "reflection_memory", "benchmark_report_json", "mock_mode_for_autograding"], discussion="Reflexion helps when the first attempt stops after the first hop or drifts to a wrong second-hop entity. The tradeoff is higher attempts, token cost, and latency. In a real report, students should explain when the reflection memory was useful, which failure modes remained, and whether evaluator quality limited gains.")
+    summary = summarize(records)
+    failure_modes = failure_breakdown(records)
+    extensions = ["structured_evaluator", "reflection_memory", "benchmark_report_json"]
+    if mode == "mock":
+        extensions.append("mock_mode_for_autograding")
+    discussion = build_discussion(summary, failure_modes, mode)
+    return ReportPayload(meta={"dataset": dataset_name, "mode": mode, "num_records": len(records), "agents": sorted({r.agent_type for r in records})}, summary=summary, failure_modes=failure_modes, examples=examples, extensions=extensions, discussion=discussion)
+
+
+def build_discussion(summary: dict, failure_modes: dict, mode: str) -> str:
+    react = summary.get("react", {})
+    reflexion = summary.get("reflexion", {})
+    delta = summary.get("delta_reflexion_minus_react", {})
+    react_wrong = failure_modes.get("react", {}).get("wrong_final_answer", 0)
+    reflexion_wrong = failure_modes.get("reflexion", {}).get("wrong_final_answer", 0)
+    token_label = "real API token usage" if mode == "openai" else "estimated token usage"
+    return (
+        f"On this benchmark, Reflexion improved EM from {react.get('em', 0)} to {reflexion.get('em', 0)} "
+        f"(delta {delta.get('em_abs', 0)}). The gain came with higher average attempts "
+        f"({react.get('avg_attempts', 0)} -> {reflexion.get('avg_attempts', 0)}), higher {token_label} "
+        f"({react.get('avg_token_estimate', 0)} -> {reflexion.get('avg_token_estimate', 0)}, delta {delta.get('tokens_abs', 0)}), "
+        f"and higher latency ({react.get('avg_latency_ms', 0)} ms -> {reflexion.get('avg_latency_ms', 0)} ms, "
+        f"delta {delta.get('latency_abs', 0)} ms). Wrong-final-answer failures dropped from "
+        f"{react_wrong} in ReAct to {reflexion_wrong} in Reflexion, which suggests the reflection loop often corrected "
+        f"initial answer formulation mistakes. Remaining errors should be inspected manually to see whether they come from "
+        f"actor grounding issues, evaluator strictness, or reflections that did not provide a useful next strategy."
+    )
 
 def save_report(report: ReportPayload, out_dir: str | Path) -> tuple[Path, Path]:
     out_dir = Path(out_dir)
